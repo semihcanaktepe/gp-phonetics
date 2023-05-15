@@ -1,0 +1,848 @@
+---
+title: "Tutorial on Analyzing Phonetic Data with Gaussian Process Regression"
+author: "Semih Can Aktepe"
+date: "2023-05-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Packages necessary for this tutorial
+library(sf)
+library(brms)
+library(dplyr)
+library(terra)
+library(rgdal)
+library(viridis)
+library(MCMCpack)
+library(posterior)
+library(bayestestR)
+library(BayesFactor)
+library(marginaleffects)
+```
+
+Human speech measurements frequently display nonlinear characteristics. For instance, the development of pitch contours over time is typically non-linear. F0 contours can be highly wiggly, depending on the language and its prosodic structure. This wiggliness sometimes cannot be captured with commonly used models such as Generalized Linear Models (GLM). Introducing polynomials terms to make them work; on the other hand, may lead to overfitting problems. One common solution is Generalized Additive Models (GAM). However, they also fail when there is less data. In this tutorial, I offer guidance on how to utilize the Gaussian Process Regression (GPR) to examine phonetic data. I demonstrate how GPR can effectively capture the various nonlinear effects and patterns that are common in phonetic data. To showcase the application of GPR, I examine two Taiwan Mandarin datasets from Chuang, Fon, Papakyritsis and Baayen (2021). This tutorial presents identifying non-linearities in F0 contours (time-series) and socio-phonetic variation in geographical distribution. Through a step-by-step approach, I address problems that can arise at different stages of analysis and show how the GPR can solve them.
+
+## Gaussian Process Regression (GPR)
+A GPR is a statistical model used for modeling functions, typically in machine learning and Bayesian statistics. It is defined as a collection of random variables, any finite number of which have a joint Gaussian distribution. A Gaussian process is fully characterized by its mean function and covariance function. It is often used in regression problems, where the goal is to predict the value of a function at a given input, given a set of input-output pairs. The Gaussian process assumes that the function being modeled is a realization of a Gaussian random process, and uses the properties of the joint Gaussian distribution to make predictions about the function at new input locations. It has the advantage of being flexible and able to model a wide range of functions, and can also incorporate prior knowledge about the function being modeled.
+
+### Applications of GPR
+GPR has a wide range of applications, including regression, classification, and time series modeling. They are often used in problems where there is a limited amount of data, as they are able to make predictions based on the available data and the assumptions encoded in the covariance function. When working with data, it is often the case that there is a limited amount of data available. This can occur for various reasons, such as the data being expensive or difficult to obtain, or the data being generated from a rare or infrequent event. In such cases, it can be challenging to make accurate predictions or estimates based on the limited data available. This is where GPR can be particularly useful. Because GPR is able to make predictions based on the available data and the assumptions encoded in the covariance function, they are well-suited to situations where there is a limited amount of data. By using the covariance function to capture the underlying patterns in the data, GPR able to make accurate predictions even with limited data. For example, imagine a child language development laboratory conducting an eye-tracking study during Covid-19 pandemic. Because of lock-down, limited number of participants could participate in the experiment. The lab could use a GPR to model the change in gaze as a function of time, based on the available data. By using the covariance function to capture the underlying patterns in the eye-tracking data, the GPR could make accurate predictions about the changes in gaze, even with limited data. However, this does not imply that a study can be low-powered; GPR just suggests relatively better predictions given the data.
+
+### Covariance Function
+In fitting GPR, one of the most essential part is selecting the covariance function. A covariance function, also known as a kernel function, is a mathematical function that specifies the covariance (or similarity) between two data points in a GPR. In other words, the covariance function determines how correlated two points are in a given dataset. It is similar to AR(1) process in fitting GAMs. Phonetics datasets often include time-series, where a certain time point, t, is correlated with t-1. This is called autocorrelation. Autocorrelation can be a problem in statistical analysis because it violates the assumption of independence between data points. If the data points are not independent, statistical tests can be biased or unreliable, leading to incorrect conclusions or inaccurate predictions. If autocorrelation is not accounted for in a statistical analysis, the model may be overfitting the data or making incorrect predictions. For example, in time series modeling, failing to account for autocorrelation can lead to incorrect estimates of the model parameters or inaccurate predictions of future values.   
+
+Covariance function accounts for autocorrelation in GPR. Therefore, the choice of covariance function is critical in Gaussian process modeling. Different covariance functions have different shapes and properties, and the choice of covariance function can have a significant impact on the performance of the Gaussian process. There are different covariance functions (For more covariance functions, refer to: https://www.cs.toronto.edu/~duvenaud/cookbook/), yet the software package (brms) I use only supports Exponetiated Quadratic Kernel for now.
+
+Without further ado, let's get started!
+
+## Modeling with GPR
+### Time series of acoustic measurements: F0 contours
+
+Many studies in phonetics involve measuring F0, but statistical analyses often do not consider the entire contour. In this section, I will demonstrate how to use a GPR to model time-varying F0 measurements, and how to identify deviations in the contours of two contrasting levels. Additionally, I will introduce methods for comparing and evaluating models.
+
+For this section, I will use "tone" dataset from Chuang, Fon, Papakyritsis and Baayen (2021) (publicly available at https://osf.io/5wf4v/). The details about the study can also be accessed from there. Let's load the dataset.
+
+```{r}
+tone <- load("/Users/semih/Downloads/data/tone.rda")
+```
+
+As the first step of data analysis, we first visualize the data. Doing so, we need to aggregate the data.
+
+```{r}
+# Dummy variable for some computations
+tone$ss <- 1
+# Compute mean pitch for each time point, context, location and sex
+d1 <- aggregate(pitch ~ time + context + location + sex, data = tone, FUN = mean)
+# Compute standard deviation of pitch for each time point, context, location and sex
+d2 <- aggregate(pitch ~ time + context + location + sex, data = tone, FUN = sd)
+# Finally compute the number of data points for each time point, context, location and sex
+d3 <- aggregate(ss ~ time + context + location + sex, data = tone, FUN = sum)
+
+# Combine the data sets
+d <- cbind(d1, sd = d2$pitch, ss = d3$ss)
+# Compute the standard error
+d$se <- d$sd/sqrt(d$ss)
+# Control for 95% Confidence interval (set to 0.05, therefore)
+alpha = 0.05
+# Compute the confidence interval
+d$ci <- qt(p=alpha/2, df=d$ss,lower.tail=F)*(d$sd/sqrt(d$ss))
+# Compute lower and upper bound of the confidence interval
+d$Low <- d$pitch - d$ci
+d$High <- d$pitch + d$ci
+# Remove the unncessary datasets
+rm(d1,d2,d3)
+```
+
+Now we can visualize the pitch values (Hz) for each cluster of # Compute mean pitch for each time point, context, location and sex.
+```{r}
+#par(mfrow=c(4,4), mar = c(2, 2, 2, 2))
+for (i in levels(d$context)){
+  for (j in levels(d$location)){
+    dat <- subset(d, d$context == i & d$location == j)
+    plot(NULL,xlim=c(1,10), ylim=c(70,280), xlab="Time", ylab="Pitch (Hz)", bty="l", xaxt = "n",
+         main=paste(j, i, sep = " "))
+    polygon(c(1:10, rev(1:10)), c(dat$Low[1:10], rev(dat$High[1:10])), col = rgb(0,0,1,0.25), border = NA)
+    lines(1:10, dat$pitch[1:10], type = "l", lwd = 1, col = "blue")
+    polygon(c(1:10, rev(1:10)), c(dat$Low[11:20], rev(dat$High[11:20])), col = rgb(1,0,0,0.25), border = NA)
+    lines(1:10, dat$pitch[11:20], type = "l", lwd = 1, col = "red")
+    axis(1,1:10)
+    legend("bottomright", inset = 0.03, c("Male", "Female"), 
+       col = c("blue", "red"), lty = 1, lwd = 1, cex = 0.75)
+  }
+}
+```
+
+### Model Fitting
+
+Before fitting the first GPR model, we need to take some points into account. Unlike GAM fitted with mgcv package that can fit separate splines for the random effects, the current implementation of brms cannot fit hierarchical Gaussian process terms for the random effects. However, it is still possible to introduce random intercept and slope terms. Introducing these terms increase the model convergence times drastically. Therefore, I will not include these terms into the models, yet it is highly recommended to include them to the models for real-life data analyses. In the last section of the tutorial, the models with random effect terms will be shown as well. Let's continue for now.
+
+The first model is fitted with sex, location, and context as the fixed-effects and the factor time is introduced as the Gaussian process term to their effect on pitch. In Bayesian data analysis, one of the most important steps is the prior selection. When selecting priors for a Bayesian analysis, it is important to consider prior knowledge, data scale and mathematical properties. Priors should reflect prior knowledge, be weakly-informative when there is no prior knowledge, and be compatible with the scale of the data. Additionally, priors should be well-behaved to avoid mathematical or computational difficulties.
+
+In our case, we scale the outcome variable, pitch, for the ease of computation and the use of weakly-informative priors. Scaled variables can always be back-transformed. Using the inverse of the transformation process. We will do this when interpreting the estimates of the models.
+
+Here, pitch is z-transformed and saved a variable called zPitch in tone dataset. The reason for this kind of transformation is that Normal(0,1) will be set as the prior for the intercept. Z-transformation scales the data between -1 and +1 (centered at 0), so the weakly-informative Normal(0,1) can be used with ease.
+
+```{r}
+# Mean pitch
+muPitch <- mean(tone$pitch)
+# Standard Deviation of pitch
+sdPitch <- sd(tone$pitch)
+# Z-transformation
+tone$zPitch <- (tone$pitch-muPitch)/sdPitch
+```
+
+We can get the original pitch values by multiplying the zPitch values with the standard deviation of the pitch values and adding their mean to that product. Compare pitch and originalPitch values.
+
+```{r}
+tone$originalPitch <- tone$zPitch*sdPitch+muPitch
+```
+
+As stated previously, our models will not include random effects for now. Thus, we aggregate the data to speed up the convergence times a bit.
+```{r}
+tone_agg <- aggregate(zPitch ~ time + context + location + sex, data = tone, FUN = mean)
+```
+
+In this model, sex, location and context were added as fixed effects, and time is introduced as a Gaussian process. We have already discussed the priors for intercept. We also set the prior for the slopes (effects of predictors) as Normal(0,1) because their effects can be positive or negative, and we do not have an assumption about to how big or small they can be. We also specify priors for lscale and sdgp parameters, but I will not discuss them right now. The details will be given in the next sections. Okay, let's fit the model now.
+```{r}
+tone.gp0 <- brm(zPitch ~ 1 + sex + location + context + gp(time),
+          prior = c(prior(normal(0, 1), class = Intercept),
+                    prior(normal(0, 1), class = b),
+                    prior(inv_gamma(3, 1), class = lscale),
+                    prior(exponential(1), class = sdgp)),
+          data = tone_agg, family = gaussian, sample_prior = TRUE,
+          iter = 6000, warmup = 2000, chains = 4, cores = 8,
+          control = list(adapt_delta = 0.999, max_treedepth = 16))
+```
+
+After fitting a model, first thing to do is to check the model fit. A sign of good convergence is that the trace plots look like "a hairy caterpillar", such that chains kinkily. If you noticed that our model has some divergent transitions. This is normally bad, but by checking the trace plots, R-hat and BULK values, we can decide if the model did well or not.
+```{r}
+plot(tone.gp0, ask = FALSE)
+```
+
+Now let's check how well the model predicted the real values by performing posterior predictive check. The model seems to have done a good job.
+```{r}
+pp_check(tone.gp0, ask = FALSE)
+```
+
+Check the bayesian R^2 as well.
+```{r}
+bayes_R2(tone.gp0)
+```
+
+Now check out the model summary. First thing to do is checking R-hat and effective sample sizes (ESS). R-hat values are always 1.0. If R-hat valeus had been 1.01+ or ESS had been low, we would not be able to use the model because of poor convergence. The model summary has several parts. The first part is Gaussian Process Terms. This part gives the posterior distribution of the kernel function parameters. Sdgp parameters tells how close the points should be to influence each other and Length-scale (lscale) parameter tells how wiggly the Gaussian Process is. However, without visualization, it is not possible to interpret what they underlie.
+
+The second part is population-level effects. They are like parametric terms section of the GAMs. This part shows that females have higher pitch than males. On the other hand, the results also suggest that Taipei people have a higher pitch than Taichung people. The effect of context is varying as well.
+
+```{r}
+summary(tone.gp0, prob = .95)
+```
+
+Now we visually interpret the data. To do that we need to run a posterior predictive simulation. 
+
+```{r}
+post_gp0 <- as.data.frame(posterior_epred(tone.gp0, newdata = tone_agg))
+```
+
+```{r}
+mean_gp0 <- c()
+for (i in 1:ncol(post_gp0)){
+  mean_gp0[i] <- mean(post_gp0[,i])
+}
+```
+
+```{r}
+pred_gp0 <- ci(post_gp0, method = "HDI")
+pred_gp0$est <- mean_gp0*sdPitch+muPitch
+pred_gp0$Low <- pred_gp0$CI_low*sdPitch+muPitch
+pred_gp0$High <- pred_gp0$CI_high*sdPitch+muPitch
+```
+
+```{r}
+pred_gp0$time <- tone_agg$time
+pred_gp0$context <- tone_agg$context
+pred_gp0$location <- tone_agg$location
+pred_gp0$sex <- tone_agg$sex
+```
+
+```{r}
+plot(NULL,xlim=c(1,10), ylim=c(160,180), xlab="Time", ylab="Pitch (Hz)", bty="l", xaxt = "n",
+     main = "Posterior Predictive Distribution of Pitch (95% CrI)")
+polygon(c(1:10, rev(1:10)), c(aggregate(Low ~ time, data = pred_gp0, FUN=mean)$Low, 
+                              rev(aggregate(High ~ time, data = pred_gp0, FUN=mean)$High)), 
+        col = rgb(0,0,0,0.25), border = NA)
+lines(aggregate(est ~ time, data = pred_gp0, FUN=mean)$est, type = "l", lwd = 1)
+axis(1,1:10)
+```
+
+We can also fit a separate GP terms for different levels of a variable. For example, to investigate the effect of context as a function of time, we can tell the model to fit different GPs for each level of context. We do this by "by" argument of the "gp" function. The rest is the same with the previous model.
+```{r}
+tone.gp1 <- brm(zPitch ~ 1 + sex + location + context + gp(time, by = context),
+          prior = c(prior(normal(0, 1), class = Intercept),
+                    prior(normal(0, 1), class = b),
+                    prior(inv_gamma(3, 1), class = lscale),
+                    prior(exponential(1), class = sdgp)),
+          data = tone_agg, family = gaussian, sample_prior = TRUE,
+          iter = 6000, warmup = 2000, chains = 4, cores = 8,
+          control = list(adapt_delta = 0.999, max_treedepth = 16))
+```
+
+This time we have no divergent transitions. Trace plots are fine.
+```{r}
+plot(tone.gp1, ask = FALSE)
+```
+
+Posterior predictive is good as well.
+```{r}
+pp_check(tone.gp1, ask = FALSE)
+```
+
+Bayesian R^2 is relatively better than the first model
+```{r}
+bayes_R2(tone.gp1)
+```
+
+When we check out the model summary, we see that there are different sdgp and lscale parameters for each context. Our population-level effects are the same as the previous model's.
+```{r}
+summary(tone.gp1, prob = .95)
+```
+
+Before we extract the posterior predictives, let's compare the models. We can do this by "loo" function. This is Leave-One-Out Cross Validation" method (LOOCV). LOOCV is a technique used in statistical modeling to evaluate the performance of a model. The basic idea behind LOOCV is to repeatedly fit the model using all observations except one and then use the omitted observation to test the model's predictive accuracy. This process is repeated for each observation in the dataset, resulting in a set of predictions that can be compared to the actual values to assess the model's performance. The model comparison ranks the tone.gp1 model where there were separate GPs for each context higher than tone.gp0 model where there were only one GP term.
+
+```{r}
+loo(tone.gp0, tone.gp1)
+```
+
+```{r}
+post_gp1 <- as.data.frame(posterior_epred(tone.gp1, newdata = tone_agg))
+```
+
+```{r}
+mean_gp1 <- c()
+for (i in 1:ncol(post_gp1)){
+  mean_gp1[i] <- mean(post_gp1[,i])
+}
+```
+
+```{r}
+pred_gp1 <- ci(post_gp1, method = "HDI")
+pred_gp1$est <- mean_gp1*sdPitch+muPitch
+pred_gp1$Low <- pred_gp1$CI_low*sdPitch+muPitch
+pred_gp1$High <- pred_gp1$CI_high*sdPitch+muPitch
+```
+
+```{r}
+pred_gp1$time <- tone_agg$time
+pred_gp1$context <- tone_agg$context
+pred_gp1$location <- tone_agg$location
+pred_gp1$sex <- tone_agg$sex
+```
+
+```{r}
+agg1 <- aggregate(est ~ context + time, data = pred_gp1, FUN=mean)
+agg2 <- aggregate(Low ~ context + time, data = pred_gp1, FUN=mean)
+agg3 <- aggregate(High ~ context + time, data = pred_gp1, FUN=mean)
+agg <- cbind(agg1, Low=agg2$Low, High=agg3$High)
+rm(agg1,agg2,agg3)
+```
+
+```{r}
+par(mfrow=c(2,4))
+for (i in sort(levels(agg$context), decreasing = F)){
+  dat <- subset(agg, agg$context == i)
+  plot(NULL,xlim=c(1,10), ylim=c(150,190), xlab="Time", ylab="Pitch (Hz)", bty="l", xaxt = "n", main = i)
+  polygon(c(1:10, rev(1:10)), c(dat$Low, rev(dat$High)), col = rgb(0,0,0,0.25), border = NA)
+lines(dat$est, type = "l", lwd = 1)
+axis(1,1:10)
+}
+par(mfrow=c(1,1))
+```
+
+It is also possible to add more GP terms for different variables and their interactions with the other variables by manually computing the clusters of interest. In order to add interaction terms at the population-level effects, the same procedure and syntax in GLMs are valid for GPR as well. For example, let's check the interaction between context and location, and introduce a different GP for each context-location cluster. Please note that as the model gets more complex, convergence times also increase drastically, so adjust your expectations accordingly!
+```{r}
+# Introduce the location-context cluster
+tone_agg$cluster <- paste(tone_agg$context, tone_agg$location, sep = ".")
+```
+
+
+```{r}
+tone.gp2 <- brm(zPitch ~ 1 + sex + location*context + gp(time, by = cluster),
+          prior = c(prior(normal(0, 1), class = Intercept),
+                    prior(normal(0, 1), class = b),
+                    prior(inv_gamma(3, 1), class = lscale),
+                    prior(exponential(1), class = sdgp)),
+          data = tone_agg, family = gaussian, sample_prior = TRUE,
+          iter = 4000, warmup = 2000, chains = 4, cores = 8,
+          control = list(adapt_delta = 0.99, max_treedepth = 12))
+```
+
+We don't have any divergent transitions. Trace plots are fine.
+
+```{r}
+plot(tone.gp2, ask = FALSE)
+```
+
+```{r}
+
+pp_check(tone.gp2, ask = FALSE)
+```
+
+Bayesian R^2 is even better than the first two model.
+```{r}
+bayes_R2(tone.gp2)
+```
+
+Now check the model summary.
+```{r}
+summary(tone.gp2, prob = .95)
+```
+
+Compare all three models so far. tone.gp2 seems to be the best one. 
+```{r}
+loo(tone.gp0, tone.gp1, tone.gp2)
+```
+
+Now extract the posterior predictives.
+```{r}
+post_gp2 <- as.data.frame(posterior_epred(tone.gp2, newdata = tone_agg))
+```
+
+```{r}
+mean_gp2 <- c()
+for (i in 1:ncol(post_gp2)){
+  mean_gp2[i] <- mean(post_gp2[,i])
+}
+```
+
+```{r}
+pred_gp2 <- ci(post_gp2, method = "HDI")
+pred_gp2$est <- mean_gp2*sdPitch+muPitch
+pred_gp2$Low <- pred_gp2$CI_low*sdPitch+muPitch
+pred_gp2$High <- pred_gp2$CI_high*sdPitch+muPitch
+```
+
+```{r}
+pred_gp2$time <- tone_agg$time
+pred_gp2$context <- tone_agg$context
+pred_gp2$location <- tone_agg$location
+pred_gp2$sex <- tone_agg$sex
+pred_gp2$cluster <- tone_agg$cluster
+```
+
+```{r}
+agg1 <- aggregate(est ~ cluster + location + context + time, data = pred_gp2, FUN=mean)
+agg2 <- aggregate(Low ~ cluster + location + context + time, data = pred_gp2, FUN=mean)
+agg3 <- aggregate(High ~ cluster + location + context + time, data = pred_gp2, FUN=mean)
+aggC <- cbind(agg1, Low=agg2$Low, High=agg3$High)
+rm(agg1,agg2,agg3)
+```
+
+```{r}
+par(mfrow=c(2,4))
+for (i in sort(levels(aggC$context), decreasing = F)){
+  dat <- subset(aggC, aggC$context == i) %>% arrange(location)
+  plot(NULL,xlim=c(1,10), ylim=c(140,190), xlab="Time", ylab="Pitch (Hz)", bty="l", xaxt = "n", main = i)
+  polygon(c(1:10, rev(1:10)), c(dat$Low[1:10], rev(dat$High[1:10])), col = rgb(1,0,0,0.25), border = NA)
+  lines(dat$est[1:10], type = "l", lwd = 1, col = "red")
+  polygon(c(1:10, rev(1:10)), c(dat$Low[11:20], rev(dat$High[11:20])), col = rgb(0,0,1,0.25), border = NA)
+  lines(dat$est[11:20], type = "l", lwd = 1, col = "blue")
+  axis(1,1:10)
+}
+par(mfrow=c(1,1))
+```
+
+
+### subset P2
+```{r}
+tone_agg_P2 = droplevels(tone_agg[tone_agg$context=="P2.T2" | tone_agg$context=="P2.T3",])
+```
+
+```{r}
+tone.p2gp <- brm(zPitch ~ 1 + sex + location + gp(time, by = context),
+                 prior = c(prior(normal(0, 1), class = Intercept),
+                           prior(normal(0, 1), class = b),
+                           prior(inv_gamma(3, 1), class = lscale),
+                           prior(exponential(1), class = sdgp)),
+                 data = tone_agg_P2, family = gaussian, sample_prior = TRUE,
+                 iter = 4000, warmup = 2000, chains = 4, cores = 8,
+                 control = list(adapt_delta = 0.99, max_treedepth = 12))
+```
+
+We have three divergent transitions. Trace plots are fine, though.
+```{r}
+plot(tone.p2gp, ask = FALSE)
+```
+
+
+```{r}
+pp_check(tone.p2gp, ask = FALSE)
+```
+
+Now check the model summary.
+```{r}
+summary(tone.p2gp, prob = .95)
+```
+
+Now extract the posterior predictives.
+```{r}
+tone_agg_P2 <- tone_agg_P2 %>% arrange(context)
+```
+
+```{r}
+post_p2gp <- as.data.frame(posterior_epred(tone.p2gp, newdata = tone_agg_P2))
+```
+
+```{r}
+mean_p2gp <- c()
+for (i in 1:ncol(post_p2gp)){
+  mean_p2gp[i] <- mean(post_p2gp[,i])
+}
+```
+
+```{r}
+pred_p2gp <- ci(post_p2gp, method = "HDI")
+pred_p2gp$est <- mean_p2gp*sdPitch+muPitch
+pred_p2gp$Low <- pred_p2gp$CI_low*sdPitch+muPitch
+pred_p2gp$High <- pred_p2gp$CI_high*sdPitch+muPitch
+```
+
+```{r}
+pred_p2gp$time <- tone_agg_P2$time
+pred_p2gp$context <- tone_agg_P2$context
+pred_p2gp$location <- tone_agg_P2$location
+pred_p2gp$sex <- tone_agg_P2$sex
+```
+
+```{r}
+agg1 <- aggregate(est ~ context + time, data = pred_p2gp, FUN=mean)
+agg2 <- aggregate(Low ~ context + time, data = pred_p2gp, FUN=mean)
+agg3 <- aggregate(High ~ context + time, data = pred_p2gp, FUN=mean)
+aggP2 <- cbind(agg1, Low=agg2$Low, High=agg3$High) %>% arrange(context)
+rm(agg1,agg2,agg3)
+```
+
+```{r}
+par(mfrow=c(1,2))
+plot(NULL, xlim=c(1,10), ylim=c(150,190), xlab="Time", ylab="Pitch (Hz)", bty="l", xaxt = "n", 
+     main = "Post. Pred. of Pitch (95% CrI)")
+polygon(c(1:10, rev(1:10)), c(aggP2$Low[1:10], rev(aggP2$High[1:10])), col = rgb(0,0,1,0.25), border = NA)
+lines(aggP2$est[1:10], type = "l", lwd = 2, col = "blue")
+polygon(c(1:10, rev(1:10)), c(aggP2$Low[11:20], rev(aggP2$High[11:20])), col = rgb(1,0,0,0.25), border = NA)
+lines(aggP2$est[11:20], type = "l", lwd = 2, col = "red")
+axis(1, 1:10, cex.axis=0.85)
+legend("bottomright", inset = 0.03, lty = 1, col = c("blue", "red"), c("P2.T2", "P2.T3"), cex = 0.75)
+
+# Subset by context
+t2 <- subset(aggP2, aggP2$context == "P2.T2")
+t3 <- subset(aggP2, aggP2$context == "P2.T3")
+# Plot the difference
+plot(NULL, xlim=c(1,10), ylim=c(-15,15), xlab="Time", ylab="Pitch Difference (Hz)", bty="l", xaxt = "n", 
+     main = "P2.T3 - P2.T2")
+polygon(c(1:10, rev(1:10)), c(t3$High-t2$Low, rev(t3$Low-t2$High)), col = rgb(0,0,0,0.25), border = NA)
+lines(t3$est-t2$est, type = "l", lwd = 2)
+abline(h=0)
+axis(1, 1:10, cex.axis=0.85)
+par(mfrow=c(1,1))
+```
+
+## Geographic phonetic variation
+```{r}
+# Scale centfreq between 0 and 1 (will be used for visualization)
+mer$CF <- (mer$centfreq-min(mer$centfreq))/(max(mer$centfreq)-min(mer$centfreq))
+# Mean pitch
+muCF <- mean(mer$centfreq)
+# Standard Deviation of pitch
+sdCF <- sd(mer$centfreq)
+# Z-transformation
+mer$zCF <- (mer$centfreq-muCF)/sdCF
+```
+
+
+```{r}
+taiwan <- readOGR(dsn="/Users/semih/Desktop/taiwan", layer="TWN_adm2")
+```
+
+
+```{r}
+plot(mer_agg$longitude, mer_agg$latitude)
+```
+
+```{r}
+mer_agg <- aggregate(centfreq ~ sibilant + longitude + latitude, data = mer, FUN = mean)
+mer_agg$zCF <- (mer_agg$centfreq - min(mer_agg$centfreq))/(max(mer_agg$centfreq)-min(mer_agg$centfreq))
+dental <- mer_agg[mer_agg$sibilant == "D",]
+retro <- mer_agg[mer_agg$sibilant == "R",]
+```
+
+
+```{r}
+par(mfrow=c(1,2))
+### Dental
+plot(NULL, xlim=c(120.0,122.0), ylim=c(21.65,25.5), xlab = "Longitude", ylab = "Latitude", 
+     main = "Dental", xaxt = "n", asp = 1)
+for (i in 1:117){
+  points(dental$longitude[i], dental$latitude[i], pch = 19, cex = 1.5, col = rgb(dental$zCF[i],0,0.33,0.75))
+}
+axis(1, 120:122)
+plot(taiwan, add=TRUE, lwd=0.7)
+points(121.57, 25.1, pch=18, cex = 1.25, col = "gray")
+text(121.57, 25.45, "Taipei", cex=0.75)
+points(120.6, 24.14, pch=18, cex = 1.25, col = "gray")
+text(120.1, 24.4, "Taichung", cex=0.75)
+points(120.31, 22.61, pch=18, cex = 1.25, col = "gray")
+text(120.1, 22.2, "Kaohsiung", cex=0.75)
+# Legend
+for (i in seq(0.1, 1.0, length.out=10)){
+  points(122.325, 22+i, pch=15, col = rgb(i,0,0.33,1), cex = 1)
+}
+text(c(122.5, rep(122.575,3)), c(23.2, 22.15, 22.55, 22.95), c("CentFreq", 3500, 5500, 7500), cex = 0.5)
+rect(xleft = 122.2, xright = 122.8, ybottom = 22, ytop = 23.3)
+
+### Retroflex
+plot(NULL, xlim=c(120.0,122.0), ylim=c(21.65,25.5), xlab = "Longitude", ylab = "Latitude", 
+     main = "Retroflex", xaxt = "n", asp = 1)
+for (i in 1:117){
+  points(retro$longitude[i], retro$latitude[i], pch = 19, cex = 1.5, col = rgb(retro$zCF[i],0,0.33,0.75))
+}
+axis(1, 120:122)
+plot(taiwan, add=TRUE, lwd=0.7)
+points(121.57, 25.1, pch=18, cex = 1.25, col = "gray")
+text(121.57, 25.45, "Taipei", cex=0.75)
+points(120.6, 24.14, pch=18, cex = 1.25, col = "gray")
+text(120.1, 24.4, "Taichung", cex=0.75)
+points(120.31, 22.61, pch=18, cex = 1.25, col = "gray")
+text(120.1, 22.2, "Kaohsiung", cex=0.75)
+# Legend
+for (i in seq(0.1, 1.0, length.out=10)){
+  points(122.325, 22+i, pch=15, col = rgb(i,0,0.33,1), cex = 1)
+}
+text(c(122.5, rep(122.575,3)), c(23.2, 22.15, 22.55, 22.95), c("CentFreq", 3500, 5500, 7500), cex = 0.5)
+rect(xleft = 122.2, xright = 122.8, ybottom = 22, ytop = 23.3)
+par(mfrow=c(1,2))
+```
+
+```{r}
+mer_agg <- aggregate(zCF ~ gender + vowel + sibilant + longitude + latitude, data = mer, FUN = mean)
+```
+
+```{r}
+mer.gp <- brm(zCF ~ 1 + gender + vowel + sibilant + gp(longitude, latitude, by = sibilant),
+              prior = c(prior(normal(0, 0.5), class = Intercept),
+                        prior(normal(0, 1), class = b),
+                        prior(inv_gamma(3, 1), class = lscale),
+                        prior(exponential(1), class = sdgp)),
+              data = mer_agg, family = gaussian, sample_prior = TRUE,
+              iter = 4000, warmup = 2000, chains = 4, cores = 8,
+              control = list(adapt_delta = 0.99, max_treedepth = 12))
+```
+
+```{r}
+plot(mer.gp, ask = FALSE)
+```
+
+```{r}
+pp_check(mer.gp, ask = FALSE)
+```
+
+```{r}
+bayes_R2(mer.gp)
+```
+
+Now check the model summary.
+```{r}
+summary(mer.gp, prob = .95)
+```
+
+Now extract the posterior predictives.
+```{r}
+post_mer <- as.data.frame(posterior_epred(mer.gp, newdata = mer_agg))
+```
+
+```{r}
+mean_mer <- c()
+for (i in 1:ncol(post_mer)){
+  mean_mer[i] <- mean(post_mer[,i])
+}
+```
+
+```{r}
+pred_mer <- ci(post_mer, method = "HDI")
+pred_mer$est <- mean_mer*sdCF+muCF
+```
+
+```{r}
+pred_mer$longitude <- mer_agg$longitude
+pred_mer$latitude <- mer_agg$latitude
+pred_mer$gender <- mer_agg$gender
+pred_mer$vowel <- mer_agg$vowel
+pred_mer$sibilant <- mer_agg$sibilant
+```
+
+```{r}
+aggM <- aggregate(est ~ sibilant + longitude + latitude, data = pred_mer, FUN=mean)
+aggM$est2 <- (aggM$est-min(aggM$est))/(max(aggM$est)-min(aggM$est))
+```
+
+```{r}
+dental <- subset(aggM, aggM$sibilant == "D")
+retro <- subset(aggM, aggM$sibilant == "R")
+```
+
+```{r}
+par(mfrow=c(1,2))
+plot(NULL, xlim=c(120,122), ylim=c(21.65,25.5), xlab="Longtitude", ylab="Latitude", main="Dental")
+for (i in 1:nrow(dental)){
+  points(dental$longitude[i], dental$latitude[i], col=rgb(1,0,0,dental$est2[i]), pch = 16)
+}
+plot(taiwan, add=TRUE, lwd=0.7)
+points(121.57, 25.1, pch=18, cex = 1.25)
+text(121.57, 25.45, "Taipei", cex=0.75)
+points(120.6, 24.14, pch=18, cex = 1.25)
+text(120.3, 24.4, "Taichung", cex=0.75)
+points(120.31, 22.61, pch=18, cex = 1.25)
+text(120.3, 22.2, "Kaohsiung", cex=0.75)
+
+####
+plot(NULL, xlim=c(120,122), ylim=c(21.65,25.5), xlab="Longtitude", ylab="Latitude", main="Retroflex")
+for (i in 1:nrow(retro)){
+  points(retro$longitude[i], retro$latitude[i], col=rgb(1,0,0,retro$est2[i]), pch = 16)
+}
+plot(taiwan, add=TRUE, lwd=0.7)
+points(121.57, 25.1, pch=18, cex = 1.25)
+text(121.57, 25.45, "Taipei", cex=0.75)
+points(120.6, 24.14, pch=18, cex = 1.25)
+text(120.3, 24.4, "Taichung", cex=0.75)
+points(120.31, 22.61, pch=18, cex = 1.25)
+text(120.3, 22.2, "Kaohsiung", cex=0.75)
+
+par(mfrow=c(1,1))
+```
+
+## Priors for Kernel Function
+https://distill.pub/2019/visual-exploration-gaussian-processes/
+
+```{r}
+prior_summary(tone.gp0)
+```
+
+
+```{r}
+lscale <- rinvgamma(50, 5.032748, 1.294962)
+sdgp <- rexp(50, 1)
+```
+
+
+```{r}
+plot(NULL, xlim = c(1,9), ylim = c(0,4), xlab = "Distance", ylab = "Covariance",
+     main = "Prior", bty = "l")
+for (i in 1:50){
+  curve(sdgp[i]*exp(-(x^2)/2*lscale[i]^2), add = TRUE, lwd = 3, col = rgb(1,0,0,0.25))
+}
+curve(mean(sdgp)*exp(-(x^2)/2*mean(lscale)^2), add = TRUE, lwd = 3, col = "black")
+```
+
+### Extract the posterior of the parameters
+```{r}
+ps <- as.data.frame(as_draws_df(tone.gp0))
+```
+
+
+```{r}
+par(mfrow=c(1,2))
+plot(NULL, xlim = c(1,9), ylim = c(0,4), xlab = "Distance", ylab = "Covariance",
+     main = "Prior", bty = "l", xaxt="n")
+for (i in 1:50){
+  curve(sdgp[i]*exp(-(x^2)/2*lscale[i]^2), add = TRUE, lwd = 2, col = rgb(1,0,0,0.25))
+}
+axis(1,1:9)
+curve(mean(sdgp)*exp(-(x^2)/2*mean(lscale)^2), add = TRUE, lwd = 2, col = "black")
+
+###
+plot(NULL, xlim = c(1,9), ylim = c(0,4), xlab = "Distance", ylab = "Covariance",
+     main = "Posterior", bty = "l", xaxt="n")
+for (i in sample(1:16000, 50)){
+  curve(ps$sdgp_gptime[i]*exp(-(x^2)/2*ps$lscale_gptime[i]^2), add = TRUE, lwd = 2, col = rgb(1,0,0,0.25))
+}
+curve(mean(ps$sdgp_gptime)*exp(-(x^2)/2*mean(ps$lscale_gptime)^2), add = TRUE, lwd = 2, col = "black")
+axis(1,1:9)
+par(mfrow=c(1,1))
+```
+
+
+```{r}
+ps1 <- as.data.frame(as_draws_df(tone.gp1))
+```
+
+```{r}
+sdgp_mean <- c()
+lscale_mean <- c()
+for (i in 11:18){
+  sdgp_mean[i] <- mean(ps1[,i])
+}
+for (i in 19:26){
+  lscale_mean[i] <- mean(ps1[,i])
+}
+sdgp_mean <- na.omit(sdgp_mean)
+lscale_mean <- na.omit(lscale_mean)
+```
+
+### Plot the covariance Kernel for each cluster
+```{r}
+plot(NULL, xlim = c(1,9), ylim = c(0,0.5), xlab = "Distance", ylab = "Covariance",
+     main = "Covariance Kernel", bty = "l", xaxt="n")
+for (i in 1:8){
+  curve(sdgp_mean[i]*exp(-(x^2)/2*lscale_mean[i]^2), add = TRUE, lwd = 2, col = i)
+}
+axis(1,1:9)
+legend("topright", inset = 0.03, title = "Context", levels(tone_agg$context), col = 1:8, lty = 1, lwd = 2)
+```
+
+Periodic kernel
+```{r}
+period <- 2
+plot(NULL, xlim = c(1,9), ylim = c(0,4), xlab = "Distance", ylab = "Covariance",
+     main = "Prior", bty = "l", xaxt="n")
+for (i in 1:50){
+  curve(sdgp[i]*exp(-(2*sin(pi*(x)/period)^2)/lscale[i]), add = TRUE, lwd = 3, col = rgb(1,0,0,0.25))
+}
+axis(1,1:9)
+curve(mean(sdgp)*exp(-(2*sin(pi*(x)/period)^2)/mean(lscale)), add = TRUE, lwd = 3, col = "black")
+```
+
+```{r}
+period <- 1
+plot(NULL, xlim = c(1,9), ylim = c(0,15), xlab = "Distance", ylab = "Covariance",
+     main = "Prior", bty = "l", xaxt="n")
+for (i in 1:50){
+  curve((sdgp[i]*exp(-(2*sin(pi*(x)/period)^2)/lscale[i])) * (sdgp[i]*exp(-(x^2)/2*lscale[i]^2)), 
+                                                              add = TRUE, lwd = 3, col = rgb(1,0,0,0.25))
+}
+axis(1,1:9)
+curve((mean(sdgp)*exp(-(2*sin(pi*(x)/period)^2)/mean(lscale))) * (mean(sdgp)*exp(-(x^2)/2*mean(lscale)^2)), 
+      add = TRUE, lwd = 3, col = "black")
+
+```
+
+Exponentiated Quadratic kernel is sometimes considered to be too smooth. We can simply replace the quadratic Euclidean
+distance with an absolute distance:
+```{r}
+sdgp <- rexp(50,1)
+lscale <- rexp(50,1)
+par(mfrow=c(1,2))
+plot(NULL, xlim = c(1,9), ylim = c(0,4), xlab = "Distance", ylab = "Covariance",
+     main = "Exponentiated Quadratic", bty = "l", xaxt="n")
+for (i in 1:50){
+  curve(sdgp[i]*exp(-(x^2)/2*lscale[i]^2), add = TRUE, lwd = 2, col = rgb(1,0,0,0.25))
+}
+axis(1,1:9)
+curve(mean(sdgp)*exp(-(x^2)/2*mean(lscale)^2), add = TRUE, lwd = 2, col = "black")
+#
+plot(NULL, xlim = c(1,9), ylim = c(0,4), xlab = "Distance", ylab = "Covariance",
+     main = "Ornstein-Uhlenbeck", bty = "l", xaxt="n")
+for (i in 1:50){
+  curve(sdgp[i]*exp(-x/lscale[i]), add = TRUE, lwd = 2, col = rgb(1,0,0,0.25))
+}
+axis(1,1:9)
+curve(mean(sdgp)*exp(-x/mean(lscale)), add = TRUE, lwd = 2, col = "black")
+par(mfrow=c(1,1))
+```
+
+### Random effects
+
+```{r}
+tone2 <- aggregate(zPitch ~ word + context + time, data = tone, FUN = mean)
+```
+
+```{r}
+tone.gp3f <- brm(zPitch ~ 1 + gp(time, by = context),
+                prior = c(prior(normal(0, 1), class = Intercept),
+                          prior(inv_gamma(3, 1), class = lscale),
+                          prior(exponential(1), class = sdgp)),
+                data = tone2, family = gaussian, sample_prior = TRUE,
+                iter = 4000, warmup = 2000, chains = 4, cores = 8,
+                control = list(adapt_delta = 0.99, max_treedepth = 12))
+```
+
+```{r}
+tone.gp3r <- brm(zPitch ~ 1 + (1|word) + gp(time, by = context),
+                prior = c(prior(normal(0, 1), class = Intercept),
+                          prior(exponential(1), class = sd),
+                          prior(inv_gamma(3, 1), class = lscale),
+                          prior(exponential(1), class = sdgp)),
+                data = tone2, family = gaussian, sample_prior = TRUE,
+                iter = 4000, warmup = 2000, chains = 4, cores = 8,
+                control = list(adapt_delta = 0.99, max_treedepth = 12))
+```
+
+```{r}
+plot(tone.gp3, ask=FALSE)
+```
+
+```{r}
+pp_check(tone.gp3)
+```
+
+```{r}
+bayes_R2(tone.gp3)
+```
+
+```{r}
+summary(tone.gp3)
+```
+
+```{r}
+loo(tone.gp3f, tone.gp3)
+```
+
+```{r}
+waic(tone.gp3f, tone.gp3)
+```
+
+```{r}
+words <- as.data.frame(ranef(tone.gp3)$word[,,])
+```
+
+```{r}
+plot(NULL, xlim = c(1,24), ylim = c(160, 180), main = "Random Intercept for Word", 
+     bty = "l", xaxt = "n", xlab = "Words", ylab = "Pitch (Hz)")
+points(1:24, words$Estimate*sdPitch+muPitch, pch = 19)
+arrows(1:24, words$Q2.5*sdPitch+muPitch, 1:24, words$Q97.5*sdPitch+muPitch, lwd = 1, angle = 90, length = 0.05, code = 3)
+axis(1, 1:24, labels = FALSE)
+text(0.5:23.5, par("usr")[3]-1.75, labels = levels(tone$word), srt = 45, pos = 1, xpd = TRUE, cex = 0.75)
+```
+
+```{r}
+plot(NULL, xlim=c(120,122), ylim=c(21.65,25.5), xlab="Longtitude", ylab="Latitude")
+plot(taiwan, add=TRUE, lwd=0.7)
+points(121.57, 25.1, pch=8)
+text(121.57, 25.45, "Taipei", cex=0.75)
+points(120.6, 24.14, pch=8)
+text(120.3, 24.4, "Taichung", cex=0.75)
+points(120.3, 22.6, pch=8)
+text(120.3, 22.2, "Kaohsiung", cex=0.75)
+```
+
+
