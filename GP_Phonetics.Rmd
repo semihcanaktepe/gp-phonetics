@@ -377,7 +377,7 @@ par(mfrow=c(1,1))
 
 ### subset P2
 ```{r}
-tone_agg_P2 = droplevels(tone_agg[tone_agg$context=="P2.T2" | tone_agg$context=="P2.T3",])
+tone_agg_P2 <- droplevels(tone_agg[tone_agg$context=="P2.T2" | tone_agg$context=="P2.T3",])
 ```
 
 ```{r}
